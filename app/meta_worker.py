@@ -100,7 +100,13 @@ class MetaWorker:
         state_meta = self._session_metadata(state_path)
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=settings.headless)
-            context = await browser.new_context(storage_state=str(state_path), viewport={"width": 1440, "height": 1000})
+            context = await browser.new_context(
+                storage_state=str(state_path),
+                viewport={"width": 1440, "height": 1000},
+                user_agent=settings.meta_user_agent,
+                locale=settings.meta_locale,
+                timezone_id=settings.timezone,
+            )
             page = await context.new_page()
             try:
                 try:
