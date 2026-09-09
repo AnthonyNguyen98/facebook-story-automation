@@ -9,6 +9,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials as UserCredentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 
@@ -19,11 +20,36 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapi
 QUEUE_COLUMNS = ["JOB_ID", "DATE", "TIME", "SCHEDULED_AT", "CONTENT_TYPE", "SOURCE_FILE_NAME", "SOURCE_DRIVE_URL", "TEXT_CONTENT", "MUSIC_MODE", "MUSIC_POOL", "MUSIC_TRACK_ID", "LINK_URL", "LINK_TEXT", "STATUS", "RETRY_COUNT", "NEXT_ATTEMPT_AT", "PUBLISHED_AT", "ERROR", "NOTE"]
 
 
+def _oauth_creds(info: dict[str, Any]):
+    required = ("client_id", "client_secret", "refresh_token")
+    if not all(info.get(k) for k in required):
+        raise RuntimeError("GOOGLE_OAUTH_CREDENTIALS_JSON is incomplete")
+    return UserCredentials(
+        token=None,
+        refresh_token=info["refresh_token"],
+        token_uri=info.get("token_uri") or "https://oauth2.googleapis.com/token",
+        client_id=info["client_id"],
+        client_secret=info["client_secret"],
+        scopes=SCOPES,
+    )
+
+
 def _creds():
-    info = json.loads(settings.google_service_account_json or "{}")
-    if not info.get("client_email"):
+    mode = (settings.google_auth_mode or "AUTO").strip().upper()
+    oauth_info = json.loads(settings.google_oauth_credentials_json or "{}")
+    service_info = json.loads(settings.google_service_account_json or "{}")
+
+    if mode in {"AUTO", "OAUTH"} and oauth_info.get("refresh_token"):
+        return _oauth_creds(oauth_info)
+    if mode == "OAUTH":
+        raise RuntimeError("GOOGLE_OAUTH_CREDENTIALS_JSON is not configured")
+
+    if mode in {"AUTO", "SERVICE_ACCOUNT"} and service_info.get("client_email"):
+        return service_account.Credentials.from_service_account_info(service_info, scopes=SCOPES)
+    if mode == "SERVICE_ACCOUNT":
         raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON is not configured")
-    return service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+
+    raise RuntimeError("Google credentials are not configured")
 
 
 def _parse_dt(value: str) -> datetime | None:
