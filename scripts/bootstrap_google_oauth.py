@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
+import subprocess
 from pathlib import Path
 
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -53,10 +55,18 @@ def main() -> None:
         "refresh_token": creds.refresh_token,
         "token_uri": creds.token_uri or "https://oauth2.googleapis.com/token",
     }
+    compact = json.dumps(payload, separators=(",", ":"))
 
     out = Path(args.out).expanduser().resolve()
-    out.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+    out.write_text(compact, encoding="utf-8")
     print(f"Saved OAuth credentials to: {out}")
+
+    if shutil.which("pbcopy"):
+        subprocess.run(["pbcopy"], input=compact, text=True, check=True)
+        print("Copied Railway OAuth secret to clipboard.")
+    else:
+        print("Clipboard helper not found. Copy the output file into Railway manually.")
+
     print("Do not upload this file to GitHub or send its contents in chat.")
 
 
