@@ -11,6 +11,9 @@ class Settings(BaseSettings):
     poll_seconds: int = 20
     dry_run: bool = True
 
+    # Google auth. AUTO prefers OAuth, then falls back to service account.
+    google_auth_mode: str = "AUTO"
+    google_oauth_credentials_json: str = "{}"
     google_service_account_json: str = "{}"
 
     meta_business_url: str = "https://business.facebook.com/latest/home"
