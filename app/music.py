@@ -3,6 +3,7 @@ from __future__ import annotations
 import random
 
 from .models import MusicTrack
+from .num import as_float
 
 POOLS = ["ENERGETIC", "YOUTH", "FUN", "EVENT", "INSPIRATIONAL", "CORPORATE", "CHILL"]
 
@@ -11,7 +12,7 @@ def weighted_pool(config: dict[str, str]) -> str:
     weights = []
     for pool in POOLS:
         try:
-            w = float(config.get(f"POOL_WEIGHT_{pool}", "0"))
+            w = as_float(config.get(f"POOL_WEIGHT_{pool}", "0"), 0.0)
         except ValueError:
             w = 0
         weights.append(max(0.0, w))
