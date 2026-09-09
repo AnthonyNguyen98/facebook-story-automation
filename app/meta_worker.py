@@ -34,6 +34,27 @@ class MetaWorker:
                 matches.append((p, await loc.count()))
         raise MetaUIError(f"Could not uniquely locate {role}: {patterns}; matches={matches}")
 
+    async def _diagnostic(self, page: Page, job_id: str) -> str:
+        shot = self.screenshot_dir / f"{job_id}_meta_failure.png"
+        try:
+            await page.screenshot(path=str(shot), full_page=True)
+        except Exception:
+            pass
+        try:
+            title = await page.title()
+        except Exception:
+            title = ""
+        try:
+            buttons = await page.get_by_role("button").all_inner_texts()
+        except Exception:
+            buttons = []
+        clean_buttons = []
+        for value in buttons[:60]:
+            value = " ".join((value or "").split())
+            if value and value not in clean_buttons:
+                clean_buttons.append(value[:100])
+        return f"url={page.url}; title={title[:150]!r}; buttons={clean_buttons[:40]!r}; screenshot={shot}"
+
     async def publish(self, media: Path, link_url: str, link_text: str, job_id: str) -> Path:
         self._seed_state()
         state_path = Path(settings.meta_storage_state_path)
@@ -84,6 +105,9 @@ class MetaWorker:
                 await page.wait_for_timeout(4000)
                 await context.storage_state(path=str(state_path))
                 return shot
+            except Exception as exc:
+                diag = await self._diagnostic(page, job_id)
+                raise MetaUIError(f"{exc}; META_DIAG {diag}") from exc
             finally:
                 await context.close()
                 await browser.close()
