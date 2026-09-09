@@ -10,6 +10,7 @@ from .link_text import select_link_text
 from .media import detect_type, has_audio, prepare_media
 from .meta_worker import MetaWorker
 from .music import choose_track
+from .num import as_int
 from .settings import settings
 
 
@@ -44,7 +45,7 @@ class JobRunner:
             link = (job.link_url or default_link).strip()
             if link_locked and link != default_link:
                 raise RuntimeError("LINK_LOCKED_MISMATCH")
-            repeat_window = int(float(cfg.get("LINK_TEXT_REPEAT_WINDOW", "1")))
+            repeat_window = as_int(cfg.get("LINK_TEXT_REPEAT_WINDOW", "1"), 1)
             link_text = select_link_text(cfg, self.store.recent_link_texts(repeat_window), job.link_text)
             job_dir = self.work_root / jid
             job_dir.mkdir(parents=True, exist_ok=True)
@@ -69,7 +70,7 @@ class JobRunner:
                     if not selected_track:
                         raise RuntimeError("MUSIC_TRACK_OVERRIDE_NOT_FOUND")
                 else:
-                    recent_n = int(float(cfg.get("MUSIC_REPEAT_WINDOW", "10")))
+                    recent_n = as_int(cfg.get("MUSIC_REPEAT_WINDOW", "10"), 10)
                     selected_track = choose_track(self.store.music_catalog(), job.music_pool, self.store.recent_track_ids(recent_n), cfg)
                 if not selected_track.drive_file_id:
                     raise RuntimeError("MUSIC_TRACK_FILE_MISSING")
@@ -91,8 +92,8 @@ class JobRunner:
                     self.store.mark_track_used(selected_track)
                 self.store.append_log([published.strftime("%d/%m/%Y %H:%M:%S"), jid, "PUBLISH", "PROCESSING", "PUBLISHED", "META_UI", "OK", job.retry_count, "browser-worker", str(screenshot), "", ""])
         except Exception as exc:
-            retry_max = int(float(cfg.get("RETRY_MAX", "3")))
-            delay = int(float(cfg.get("RETRY_DELAY_SEC", "120")))
+            retry_max = as_int(cfg.get("RETRY_MAX", "3"), 3)
+            delay = as_int(cfg.get("RETRY_DELAY_SEC", "120"), 120)
             retry_count = job.retry_count + 1
             if retry_count <= retry_max:
                 next_try = datetime.now(ZoneInfo(settings.timezone)) + timedelta(seconds=delay)
