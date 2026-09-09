@@ -8,6 +8,8 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
+from .num import as_float, as_int
+
 
 def run(cmd: list[str]) -> None:
     subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -56,10 +58,10 @@ def video_with_music(video: Path, music: Path, out: Path, volume: int = 18, fade
 
 def prepare_media(source: Path | None, content_type: str, text_content: str, music: Path | None, out_dir: Path, config: dict[str, str]) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
-    duration = int(float(config.get("STORY_DEFAULT_DURATION_SEC", "15")))
-    volume = int(float(config.get("DEFAULT_MUSIC_VOLUME_PERCENT", "18")))
-    fade_in = float(config.get("MUSIC_FADE_IN_SEC", "0.5"))
-    fade_out = float(config.get("MUSIC_FADE_OUT_SEC", "1"))
+    duration = as_int(config.get("STORY_DEFAULT_DURATION_SEC", "15"), 15)
+    volume = as_int(config.get("DEFAULT_MUSIC_VOLUME_PERCENT", "18"), 18)
+    fade_in = as_float(config.get("MUSIC_FADE_IN_SEC", "0.5"), 0.5)
+    fade_out = as_float(config.get("MUSIC_FADE_OUT_SEC", "1"), 1.0)
     if content_type == "TEXT":
         image = render_text_story(text_content, out_dir / "text_story.png")
         if music:
