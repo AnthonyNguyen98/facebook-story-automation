@@ -14,6 +14,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 
 from .models import MusicTrack, StoryJob
+from .num import as_float, as_int
 from .settings import settings
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
@@ -107,7 +108,7 @@ class GoogleStore:
             raw = raw + [""] * (19 - len(raw))
             if not any(str(x).strip() for x in raw):
                 continue
-            jobs.append(StoryJob(row=idx, job_id=str(raw[0]).strip(), date=str(raw[1]).strip(), time=str(raw[2]).strip(), scheduled_at=_scheduled(str(raw[1]).strip(), str(raw[2]).strip()), content_type=str(raw[4]).strip().upper() or "AUTO", source_file_name=str(raw[5]).strip(), source_drive_url=str(raw[6]).strip(), text_content=str(raw[7]).strip(), music_mode=str(raw[8]).strip().upper() or "AUTO", music_pool=str(raw[9]).strip().upper() or "AUTO", music_track_id=str(raw[10]).strip(), link_url=str(raw[11]).strip(), link_text=str(raw[12]).strip(), status=str(raw[13]).strip().upper() or "DRAFT", retry_count=int(float(raw[14])) if str(raw[14]).strip() else 0, next_attempt_at=_parse_dt(str(raw[15])), published_at=_parse_dt(str(raw[16])), error=str(raw[17]).strip(), note=str(raw[18]).strip()))
+            jobs.append(StoryJob(row=idx, job_id=str(raw[0]).strip(), date=str(raw[1]).strip(), time=str(raw[2]).strip(), scheduled_at=_scheduled(str(raw[1]).strip(), str(raw[2]).strip()), content_type=str(raw[4]).strip().upper() or "AUTO", source_file_name=str(raw[5]).strip(), source_drive_url=str(raw[6]).strip(), text_content=str(raw[7]).strip(), music_mode=str(raw[8]).strip().upper() or "AUTO", music_pool=str(raw[9]).strip().upper() or "AUTO", music_track_id=str(raw[10]).strip(), link_url=str(raw[11]).strip(), link_text=str(raw[12]).strip(), status=str(raw[13]).strip().upper() or "DRAFT", retry_count=as_int(raw[14], 0), next_attempt_at=_parse_dt(str(raw[15])), published_at=_parse_dt(str(raw[16])), error=str(raw[17]).strip(), note=str(raw[18]).strip()))
         return jobs
 
     def due_jobs(self) -> list[StoryJob]:
@@ -153,7 +154,7 @@ class GoogleStore:
             raw = raw + [""] * (16 - len(raw))
             if not str(raw[0]).strip():
                 continue
-            tracks.append(MusicTrack(row=idx, track_id=str(raw[0]).strip(), title=str(raw[1]).strip(), source=str(raw[2]).strip(), pool_primary=str(raw[3]).strip().upper(), pool_secondary=str(raw[4]).strip().upper(), energy_score=float(raw[5]) if str(raw[5]).strip() else 0.0, vocal_type=str(raw[6]).strip(), duration_sec=float(raw[7]) if str(raw[7]).strip() else 0.0, license_status=str(raw[8]).strip().upper(), drive_file_name=str(raw[9]).strip(), drive_file_id=str(raw[10]).strip(), last_used_at=str(raw[11]).strip(), use_count=int(float(raw[12])) if str(raw[12]).strip() else 0, approved=str(raw[13]).strip().upper() in {"TRUE", "YES", "1"}, notes=str(raw[14]).strip(), added_at=str(raw[15]).strip()))
+            tracks.append(MusicTrack(row=idx, track_id=str(raw[0]).strip(), title=str(raw[1]).strip(), source=str(raw[2]).strip(), pool_primary=str(raw[3]).strip().upper(), pool_secondary=str(raw[4]).strip().upper(), energy_score=as_float(raw[5], 0.0), vocal_type=str(raw[6]).strip(), duration_sec=as_float(raw[7], 0.0), license_status=str(raw[8]).strip().upper(), drive_file_name=str(raw[9]).strip(), drive_file_id=str(raw[10]).strip(), last_used_at=str(raw[11]).strip(), use_count=as_int(raw[12], 0), approved=str(raw[13]).strip().upper() in {"TRUE", "YES", "1"}, notes=str(raw[14]).strip(), added_at=str(raw[15]).strip()))
         return tracks
 
     def mark_track_used(self, track: MusicTrack) -> None:
