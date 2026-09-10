@@ -4,8 +4,9 @@ import asyncio
 import hmac
 import mimetypes
 import re
+import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -14,23 +15,40 @@ from pydantic import BaseModel
 from starlette.background import BackgroundTask
 from starlette.responses import FileResponse
 
+from .android_state import (
+    has_marker,
+    make_claim,
+    note_with_claim,
+    note_with_marker,
+    now_epoch,
+    parse_claim,
+    ready_base,
+    ready_url,
+    transition_decision,
+    valid_claim_token,
+    valid_device_id,
+)
 from .google_store import GoogleStore
+from .num import as_int
 from .runner import scheduler_loop
 from .settings import settings
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    try:
-        store = GoogleStore()
-        cfg = store.read_config()
-        print(
-            f"GOOGLE_SELF_TEST_OK auth_mode={settings.google_auth_mode} "
-            f"config_keys={len(cfg)} publish_transport={settings.publish_transport}",
-            flush=True,
-        )
-    except Exception as exc:
-        print(f"GOOGLE_SELF_TEST_ERROR {type(exc).__name__}: {exc}", flush=True)
+    if (settings.publish_transport or "").strip().upper() != "ANDROID":
+        raise RuntimeError("ONLY_ANDROID_TRANSPORT_IS_SUPPORTED")
+    if len((settings.android_api_token or "").strip()) < 32:
+        raise RuntimeError("ANDROID_API_TOKEN_MUST_BE_AT_LEAST_32_CHARS")
+
+    store = GoogleStore()
+    cfg = store.read_config()
+    print(
+        f"GOOGLE_SELF_TEST_OK auth_mode={settings.google_auth_mode} "
+        f"config_keys={len(cfg)} publish_transport=ANDROID "
+        f"pilot_safe_mode={settings.android_pilot_safe_mode}",
+        flush=True,
+    )
 
     stop = asyncio.Event()
     task = asyncio.create_task(scheduler_loop(stop))
@@ -41,36 +59,81 @@ async def lifespan(app: FastAPI):
     await task
 
 
-app = FastAPI(title="Facebook Story Automation Control Plane", lifespan=lifespan)
+app = FastAPI(
+    title="Facebook Story Automation Control Plane",
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 
 
 def _require_android(authorization: str | None = Header(default=None)) -> None:
+    if (settings.publish_transport or "").strip().upper() != "ANDROID":
+        raise HTTPException(status_code=503, detail="ANDROID_TRANSPORT_DISABLED")
     token = (settings.android_api_token or "").strip()
-    if not token:
+    if len(token) < 32:
         raise HTTPException(status_code=503, detail="ANDROID_API_TOKEN_NOT_CONFIGURED")
-    supplied = authorization or ""
     expected = f"Bearer {token}"
-    if not hmac.compare_digest(supplied, expected):
+    if not hmac.compare_digest(authorization or "", expected):
         raise HTTPException(status_code=401, detail="ANDROID_UNAUTHORIZED")
 
 
+def _device_id(value: str | None) -> str:
+    device = (value or "").strip()
+    if not valid_device_id(device):
+        raise HTTPException(status_code=400, detail="INVALID_DEVICE_ID")
+    return device
+
+
+def _claim_token(value: str | None) -> str:
+    token = (value or "").strip()
+    if not valid_claim_token(token):
+        raise HTTPException(status_code=400, detail="INVALID_CLAIM_TOKEN")
+    return token
+
+
 def _find_job(store: GoogleStore, job_id: str):
-    for job in store.read_queue():
-        if job.job_id == job_id:
-            return job
-    raise HTTPException(status_code=404, detail="JOB_NOT_FOUND")
+    matches = [j for j in store.read_queue() if j.job_id == job_id]
+    if not matches:
+        raise HTTPException(status_code=404, detail="JOB_NOT_FOUND")
+    if len(matches) != 1:
+        raise HTTPException(status_code=409, detail="DUPLICATE_JOB_ID")
+    return matches[0]
 
 
-def _ready_url(note: str) -> str:
-    note = (note or "").strip()
-    for prefix in ("ANDROID_READY:", "READY:"):
-        if note.startswith(prefix):
-            return note[len(prefix):].split(" | ", 1)[0].strip()
-    return ""
+def _assert_unique_ids(jobs) -> None:
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for job in jobs:
+        if not job.job_id:
+            continue
+        if job.job_id in seen:
+            duplicates.add(job.job_id)
+        seen.add(job.job_id)
+    if duplicates:
+        raise HTTPException(status_code=409, detail="DUPLICATE_JOB_ID_IN_QUEUE")
 
 
-def _job_payload(job) -> dict:
-    return {
+def _validate_job_payload(store: GoogleStore, job) -> None:
+    if job.content_type not in {"VIDEO", "IMAGE", "TEXT"}:
+        raise HTTPException(status_code=409, detail="INVALID_CONTENT_TYPE")
+    if not job.scheduled_at:
+        raise HTTPException(status_code=409, detail="MISSING_SCHEDULE")
+    if not job.link_url:
+        raise HTTPException(status_code=409, detail="MISSING_LINK_URL")
+    if not job.link_text:
+        raise HTTPException(status_code=409, detail="MISSING_LINK_TEXT")
+    cfg = store.read_config()
+    default_link = cfg.get("DEFAULT_LINK", "").strip()
+    locked = cfg.get("LINK_LOCKED", "TRUE").strip().upper() in {"TRUE", "1", "YES", "Y"}
+    if locked and job.link_url != default_link:
+        raise HTTPException(status_code=409, detail="LINK_LOCKED_MISMATCH")
+
+
+def _job_payload(job, claim_token: str = "", lease_until: int = 0) -> dict:
+    publish_allowed = not settings.dry_run and not settings.android_pilot_safe_mode
+    payload = {
         "job_id": job.job_id,
         "scheduled_at": job.scheduled_at.isoformat() if job.scheduled_at else None,
         "content_type": job.content_type,
@@ -78,9 +141,40 @@ def _job_payload(job) -> dict:
         "link_text": job.link_text,
         "music_mode": job.music_mode,
         "media_path": f"/api/android/jobs/{job.job_id}/media",
-        "publish_allowed": not settings.dry_run,
+        "publish_allowed": publish_allowed,
         "dry_run": settings.dry_run,
+        "pilot_safe_mode": settings.android_pilot_safe_mode,
     }
+    if claim_token:
+        payload["claim_token"] = claim_token
+        payload["lease_until_epoch"] = lease_until
+    return payload
+
+
+def _verify_current_claim(job, device_id: str, claim_token: str):
+    claim = parse_claim(job.note)
+    if not claim:
+        raise HTTPException(status_code=409, detail="JOB_HAS_NO_ACTIVE_CLAIM")
+    if claim.device_id != device_id or not hmac.compare_digest(claim.claim_token, claim_token):
+        raise HTTPException(status_code=409, detail="CLAIM_OWNERSHIP_MISMATCH")
+    return claim
+
+
+def _recover_expired_claims(store: GoogleStore, jobs) -> None:
+    current = now_epoch()
+    for job in jobs:
+        if job.status != "PROCESSING" or not ready_url(job.note):
+            continue
+        claim = parse_claim(job.note)
+        if claim and not claim.active(current):
+            base = ready_base(job.note)
+            store.update_job(
+                job.row,
+                STATUS="VALIDATED",
+                NEXT_ATTEMPT_AT="",
+                ERROR="ANDROID_CLAIM_LEASE_EXPIRED",
+                NOTE=f"{base} | ANDROID_RETRY_READY",
+            )
 
 
 class AndroidResult(BaseModel):
@@ -95,7 +189,8 @@ def health():
         "ok": True,
         "timezone": settings.timezone,
         "dry_run": settings.dry_run,
-        "publish_transport": settings.publish_transport,
+        "pilot_safe_mode": settings.android_pilot_safe_mode,
+        "publish_transport": "ANDROID",
         "google_auth_mode": settings.google_auth_mode,
         "now": datetime.now(ZoneInfo(settings.timezone)).isoformat(),
     }
@@ -105,92 +200,189 @@ def health():
 def android_ping():
     return {
         "ok": True,
-        "transport": settings.publish_transport,
+        "transport": "ANDROID",
         "dry_run": settings.dry_run,
+        "pilot_safe_mode": settings.android_pilot_safe_mode,
         "timezone": settings.timezone,
     }
 
 
 @app.get("/api/android/jobs/next", dependencies=[Depends(_require_android)])
-def android_next_job():
-    if (settings.publish_transport or "").upper() != "ANDROID":
-        raise HTTPException(status_code=503, detail="ANDROID_TRANSPORT_DISABLED")
+def android_next_job(x_device_id: str | None = Header(default=None)):
+    _device_id(x_device_id)
     store = GoogleStore()
+    jobs = store.read_queue()
+    _assert_unique_ids(jobs)
+    _recover_expired_claims(store, jobs)
+    # Re-read after lease recovery to avoid returning stale state.
+    jobs = store.read_queue()
+    now = datetime.now(ZoneInfo(settings.timezone))
     candidates = [
-        j for j in store.read_queue()
+        j for j in jobs
         if j.status == "VALIDATED"
-        and _ready_url(j.note)
-        and "ANDROID_DRY_RUN_OK" not in (j.note or "")
-        and "ANDROID_PUBLISHED" not in (j.note or "")
+        and ready_url(j.note)
+        and not has_marker(j.note, "ANDROID_DRY_RUN_OK")
+        and not has_marker(j.note, "ANDROID_PUBLISHED")
+        and (not j.next_attempt_at or j.next_attempt_at <= now)
+        and j.scheduled_at is not None
+        and j.scheduled_at <= now
     ]
     if not candidates:
         return {"job": None}
-    now = datetime.now(ZoneInfo(settings.timezone))
     candidates.sort(key=lambda j: j.scheduled_at or now)
-    return {"job": _job_payload(candidates[0])}
+    job = candidates[0]
+    _validate_job_payload(store, job)
+    return {"job": _job_payload(job)}
 
 
 @app.post("/api/android/jobs/{job_id}/claim", dependencies=[Depends(_require_android)])
-def android_claim_job(job_id: str):
+def android_claim_job(job_id: str, x_device_id: str | None = Header(default=None)):
+    device = _device_id(x_device_id)
     store = GoogleStore()
     job = _find_job(store, job_id)
-    if job.status != "VALIDATED" or not _ready_url(job.note):
+    _validate_job_payload(store, job)
+    if not ready_url(job.note):
+        raise HTTPException(status_code=409, detail="READY_MEDIA_MISSING")
+
+    current = now_epoch()
+    existing = parse_claim(job.note)
+    if job.status == "PROCESSING" and existing:
+        if existing.active(current):
+            if existing.device_id != device:
+                raise HTTPException(status_code=409, detail="JOB_CLAIMED_BY_OTHER_DEVICE")
+            return {
+                "ok": True,
+                "idempotent": True,
+                "job": _job_payload(job, existing.claim_token, existing.lease_until_epoch),
+            }
+        # Expired lease can be reclaimed below.
+    elif job.status != "VALIDATED":
         raise HTTPException(status_code=409, detail=f"JOB_NOT_READY:{job.status}")
+
+    claim = make_claim(job.note, device, settings.android_claim_lease_sec, current)
+    claimed_note = note_with_claim(job.note, claim)
     now = datetime.now(ZoneInfo(settings.timezone))
-    store.update_job(job.row, STATUS="PROCESSING", ERROR="")
+    store.update_job(
+        job.row,
+        STATUS="PROCESSING",
+        ERROR="",
+        NEXT_ATTEMPT_AT="",
+        NOTE=claimed_note,
+    )
     store.append_log([
         now.strftime("%d/%m/%Y %H:%M:%S"), job.job_id, "ANDROID_CLAIM",
-        "VALIDATED", "PROCESSING", "ANDROID_DEVICE", "OK", job.retry_count,
-        "android-companion", "", "", "Phone claimed prepared Story"
+        job.status, "PROCESSING", "ANDROID_DEVICE", "OK", job.retry_count,
+        f"android:{device}", "", "", "Leased claim; safe for idempotent retry"
     ])
-    return {"ok": True, "job": _job_payload(job)}
+    return {
+        "ok": True,
+        "idempotent": False,
+        "job": _job_payload(job, claim.claim_token, claim.lease_until_epoch),
+    }
 
 
 @app.get("/api/android/jobs/{job_id}/media", dependencies=[Depends(_require_android)])
-def android_job_media(job_id: str):
+def android_job_media(
+    job_id: str,
+    x_device_id: str | None = Header(default=None),
+    x_claim_token: str | None = Header(default=None),
+):
+    device = _device_id(x_device_id)
+    claim_token = _claim_token(x_claim_token)
     store = GoogleStore()
     job = _find_job(store, job_id)
-    if job.status not in {"VALIDATED", "PROCESSING"}:
-        raise HTTPException(status_code=409, detail=f"JOB_MEDIA_NOT_AVAILABLE:{job.status}")
-    url = _ready_url(job.note)
+    if job.status != "PROCESSING":
+        raise HTTPException(status_code=409, detail=f"JOB_MEDIA_REQUIRES_PROCESSING:{job.status}")
+    _verify_current_claim(job, device, claim_token)
+
+    url = ready_url(job.note)
     if not url:
         raise HTTPException(status_code=404, detail="READY_MEDIA_MISSING")
     file_id = store.extract_drive_id(url)
-    meta = store.drive.files().get(fileId=file_id, fields="id,name,mimeType").execute()
-    safe_job = re.sub(r"[^A-Za-z0-9_.-]", "_", job.job_id)[:100]
+    meta = store.drive.files().get(
+        fileId=file_id,
+        fields="id,name,mimeType,size,parents",
+    ).execute()
+    media_type = str(meta.get("mimeType") or "")
+    if not (media_type.startswith("image/") or media_type.startswith("video/")):
+        raise HTTPException(status_code=415, detail="UNSUPPORTED_READY_MEDIA_TYPE")
+    try:
+        size = int(meta.get("size") or 0)
+    except (TypeError, ValueError):
+        size = 0
+    if size <= 0:
+        raise HTTPException(status_code=409, detail="READY_MEDIA_EMPTY")
+    if size > settings.android_max_media_bytes:
+        raise HTTPException(status_code=413, detail="READY_MEDIA_TOO_LARGE")
+
+    cfg = store.read_config()
+    ready_folder = cfg.get("MEDIA_READY_FOLDER_ID", "").strip()
+    parents = set(meta.get("parents") or [])
+    if ready_folder and ready_folder not in parents:
+        raise HTTPException(status_code=409, detail="READY_MEDIA_OUTSIDE_APPROVED_FOLDER")
+
     original_name = str(meta.get("name") or "story_media")
-    suffix = Path(original_name).suffix
+    safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", original_name)[:180] or "story_media"
+    suffix = Path(safe_name).suffix
+    if not suffix:
+        suffix = ".mp4" if media_type.startswith("video/") else ".jpg"
     api_dir = Path(settings.work_dir) / "android_api"
     api_dir.mkdir(parents=True, exist_ok=True)
-    destination = api_dir / f"{safe_job}{suffix}"
+    destination = api_dir / f"{uuid.uuid4().hex}{suffix}"
     store.download_drive_file(file_id, destination)
-    media_type = str(meta.get("mimeType") or "") or mimetypes.guess_type(original_name)[0] or "application/octet-stream"
+    if not destination.exists() or destination.stat().st_size <= 0:
+        destination.unlink(missing_ok=True)
+        raise HTTPException(status_code=502, detail="READY_MEDIA_DOWNLOAD_EMPTY")
+    if destination.stat().st_size > settings.android_max_media_bytes:
+        destination.unlink(missing_ok=True)
+        raise HTTPException(status_code=413, detail="READY_MEDIA_TOO_LARGE")
+
     return FileResponse(
         destination,
-        media_type=media_type,
-        filename=original_name,
+        media_type=media_type or mimetypes.guess_type(safe_name)[0] or "application/octet-stream",
+        filename=safe_name,
         background=BackgroundTask(lambda: destination.unlink(missing_ok=True)),
     )
 
 
 @app.post("/api/android/jobs/{job_id}/result", dependencies=[Depends(_require_android)])
-def android_job_result(job_id: str, result: AndroidResult):
+def android_job_result(
+    job_id: str,
+    result: AndroidResult,
+    x_device_id: str | None = Header(default=None),
+    x_claim_token: str | None = Header(default=None),
+):
+    device = _device_id(x_device_id)
+    state = (result.state or "").strip().upper()
     store = GoogleStore()
     job = _find_job(store, job_id)
-    state = (result.state or "").strip().upper()
-    now = datetime.now(ZoneInfo(settings.timezone))
-    base_note = job.note.split(" | ", 1)[0] if job.note else ""
 
-    if state == "PUBLISHED":
-        if settings.dry_run:
-            raise HTTPException(status_code=409, detail="PUBLISH_DISABLED_BY_DRY_RUN")
+    # Safe idempotency for a lost HTTP response after a successful publish write.
+    if job.status == "PUBLISHED" and state == "PUBLISHED":
+        return {"ok": True, "status": "PUBLISHED", "idempotent": True}
+
+    claim_token = _claim_token(x_claim_token)
+    _verify_current_claim(job, device, claim_token)
+    try:
+        decision = transition_decision(
+            job.status,
+            state,
+            settings.dry_run or settings.android_pilot_safe_mode,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    now = datetime.now(ZoneInfo(settings.timezone))
+    base = ready_base(job.note)
+
+    if decision == "PUBLISHED":
         store.update_job(
             job.row,
             STATUS="PUBLISHED",
             PUBLISHED_AT=now,
             ERROR="",
             NEXT_ATTEMPT_AT="",
-            NOTE=f"{base_note} | ANDROID_PUBLISHED",
+            NOTE=note_with_marker(base, "ANDROID_PUBLISHED"),
         )
         if job.music_track_id:
             track = next((t for t in store.music_catalog() if t.track_id == job.music_track_id), None)
@@ -198,33 +390,43 @@ def android_job_result(job_id: str, result: AndroidResult):
                 store.mark_track_used(track)
         target_status = "PUBLISHED"
         event = "ANDROID_PUBLISH"
-    elif state in {"DRY_RUN_READY", "READY_TO_PUBLISH"}:
+    elif decision == "DRY_RUN_OK":
         store.update_job(
             job.row,
             STATUS="VALIDATED",
             ERROR="",
             NEXT_ATTEMPT_AT="",
-            NOTE=f"{base_note} | ANDROID_DRY_RUN_OK",
+            NOTE=note_with_marker(base, "ANDROID_DRY_RUN_OK"),
         )
         target_status = "VALIDATED"
         event = "ANDROID_DRY_RUN"
-    elif state in {"FAILED", "RELEASE"}:
+    else:  # RELEASE
+        cfg = store.read_config()
+        retry_max = max(0, as_int(cfg.get("RETRY_MAX", "3"), 3))
+        delay = max(30, as_int(cfg.get("RETRY_DELAY_SEC", "120"), 120))
+        retry_count = job.retry_count + 1
+        if retry_count > retry_max:
+            target_status = "FAILED"
+            next_try = ""
+            marker = "ANDROID_RETRY_EXHAUSTED"
+        else:
+            target_status = "VALIDATED"
+            next_try = now + timedelta(seconds=delay)
+            marker = "ANDROID_RETRY_READY"
         store.update_job(
             job.row,
-            STATUS="VALIDATED",
+            STATUS=target_status,
+            RETRY_COUNT=retry_count,
             ERROR=(result.error or "ANDROID_DEVICE_FAILED")[:1500],
-            NEXT_ATTEMPT_AT="",
-            NOTE=f"{base_note} | ANDROID_RETRY_READY",
+            NEXT_ATTEMPT_AT=next_try,
+            NOTE=note_with_marker(base, marker),
         )
-        target_status = "VALIDATED"
         event = "ANDROID_RELEASE"
-    else:
-        raise HTTPException(status_code=400, detail="INVALID_ANDROID_RESULT_STATE")
 
     store.append_log([
         now.strftime("%d/%m/%Y %H:%M:%S"), job.job_id, event,
-        job.status, target_status, "ANDROID_DEVICE", "OK" if state != "FAILED" else "ERROR",
-        job.retry_count, "android-companion", "", (result.error or "")[:1000],
+        job.status, target_status, "ANDROID_DEVICE", "OK" if decision != "RELEASE" else "ERROR",
+        job.retry_count, f"android:{device}", "", (result.error or "")[:1000],
         (result.note or "")[:1000]
     ])
-    return {"ok": True, "status": target_status}
+    return {"ok": True, "status": target_status, "idempotent": False}
