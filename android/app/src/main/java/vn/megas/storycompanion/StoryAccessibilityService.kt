@@ -1,15 +1,21 @@
 package vn.megas.storycompanion
 
 import android.accessibilityservice.AccessibilityService
-import android.os.Bundle
+import android.graphics.Rect
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import java.util.ArrayDeque
 
 class StoryAccessibilityService : AccessibilityService() {
+    private val createStoryTerms = listOf("Tạo tin", "Create story", "Tạo story")
+    private val photoVideoTerms = listOf(
+        "Ảnh/Video", "Ảnh và video", "Photo/video", "Photo and video", "Thêm ảnh", "Add photo"
+    )
+    private val galleryTerms = listOf("Gần đây", "Recent", "Thư viện", "Gallery")
+
     override fun onServiceConnected() {
         super.onServiceConnected()
-        Prefs.status(this, "Accessibility đã bật — chờ Story")
+        Prefs.status(this, "Accessibility Pilot đã bật — không có quyền bấm Publish")
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -20,195 +26,142 @@ class StoryAccessibilityService : AccessibilityService() {
         saveUiDiagnostic(root)
 
         val prefs = Prefs.store(this)
-        val stage = prefs.getString("automation_stage", "OPEN_META") ?: "OPEN_META"
-
-        // State recovery: if composer controls are already visible, continue from there.
-        if (stage in setOf("AFTER_CREATE", "MEDIA_PICKER") && hasAny(root, listOf("Nhãn dán", "Sticker", "Stickers"))) {
-            if (clickAny(root, listOf("Nhãn dán", "Sticker", "Stickers"))) {
-                prefs.edit().putString("automation_stage", "STICKER_MENU").apply()
-                Prefs.status(this, "Đã mở Sticker cho $jobId")
-                return
-            }
-        }
-
-        when (stage) {
+        when (prefs.getString("automation_stage", "OPEN_META") ?: "OPEN_META") {
             "OPEN_META" -> {
-                if (clickAny(root, listOf("Tạo tin", "Create story", "Tạo story"))) {
-                    prefs.edit().putString("automation_stage", "AFTER_CREATE").apply()
-                    Prefs.status(this, "Đã vào Tạo tin — đang tìm media")
-                } else {
-                    Prefs.status(this, "Đang chờ nút Tạo tin…")
+                when (val count = countExact(root, createStoryTerms)) {
+                    1 -> {
+                        if (clickUniqueExact(root, createStoryTerms)) {
+                            prefs.edit().putString("automation_stage", "AFTER_CREATE").commit()
+                            Prefs.status(this, "Pilot: đã vào Tạo tin")
+                        }
+                    }
+                    0 -> Prefs.status(this, "Pilot: chờ đúng nút Tạo tin — diagnostic đã lưu")
+                    else -> Prefs.status(this, "Pilot STOP: có $count nút Tạo tin phù hợp, không click")
                 }
             }
 
             "AFTER_CREATE" -> {
-                if (clickAny(root, listOf("Ảnh/Video", "Ảnh và video", "Photo/video", "Photo and video", "Thêm ảnh", "Add photo"))) {
-                    prefs.edit().putString("automation_stage", "MEDIA_PICKER").apply()
-                    Prefs.status(this, "Đã mở thư viện media")
-                } else if (hasAny(root, listOf("Gần đây", "Recent", "Thư viện", "Gallery"))) {
-                    prefs.edit().putString("automation_stage", "MEDIA_PICKER").apply()
-                    Prefs.status(this, "Đã nhận diện thư viện — chờ map thumbnail chính xác")
-                } else {
-                    Prefs.status(this, "Cần map UI sau màn Tạo tin — diagnostic đã lưu")
-                }
-            }
-
-            "MEDIA_PICKER" -> {
-                // Intentionally no blind thumbnail click in v0.1. The first device test maps
-                // the exact gallery node so we never choose the wrong photo/video.
-                Prefs.status(this, "Thư viện đã mở — cần map thumbnail trên đúng máy Android")
-            }
-
-            "STICKER_MENU" -> {
-                if (clickAny(root, listOf("Liên kết", "Link"))) {
-                    prefs.edit().putString("automation_stage", "LINK_FORM").apply()
-                    Prefs.status(this, "Đã mở Link Sticker")
-                } else {
-                    Prefs.status(this, "Đang tìm Link Sticker…")
-                }
-            }
-
-            "LINK_FORM" -> {
-                val url = prefs.getString("current_link_url", "") ?: ""
-                val linkText = prefs.getString("current_link_text", "") ?: ""
-                val editors = editableNodes(root)
-                if (editors.isEmpty()) {
-                    Prefs.status(this, "Đang chờ ô URL của Link Sticker…")
+                val galleryVisible = countExact(root, galleryTerms) > 0
+                if (galleryVisible) {
+                    finishPilotAtMediaPicker(jobId)
                     return
                 }
-                setNodeText(editors[0], url)
-                if (editors.size >= 2 && linkText.isNotBlank()) {
-                    setNodeText(editors[1], linkText)
-                }
-                if (clickAny(root, listOf("Xong", "Done", "Thêm", "Add"))) {
-                    prefs.edit().putString("automation_stage", "FINAL_COMPOSER").apply()
-                    Prefs.status(this, "Đã điền Link Sticker — kiểm tra màn cuối")
-                }
-            }
-
-            "FINAL_COMPOSER" -> {
-                val publishNode = findAny(root, listOf("Chia sẻ tin", "Share story", "Đăng", "Publish"))
-                if (publishNode == null) {
-                    Prefs.status(this, "Đang chờ nút Publish…")
-                    return
-                }
-                val publishAllowed = prefs.getBoolean("publish_allowed", false)
-                if (!publishAllowed) {
-                    prefs.edit().putString("automation_stage", "DRY_RUN_READY").apply()
-                    Prefs.status(this, "DRY RUN OK — đã dừng trước Publish")
-                    reportAndClear(jobId, "DRY_RUN_READY", "Dừng an toàn trước nút Publish")
-                } else if (clickNode(publishNode)) {
-                    prefs.edit().putString("automation_stage", "PUBLISHING").apply()
-                    Prefs.status(this, "Đã bấm Publish — đang chờ xác nhận")
+                when (val count = countExact(root, photoVideoTerms)) {
+                    1 -> {
+                        if (clickUniqueExact(root, photoVideoTerms)) {
+                            prefs.edit().putString("automation_stage", "MEDIA_PICKER").commit()
+                            Prefs.status(this, "Pilot: đã mở thư viện media — chờ diagnostic")
+                        }
+                    }
+                    0 -> Prefs.status(this, "Pilot: chưa nhận diện nút Ảnh/Video — diagnostic đã lưu")
+                    else -> Prefs.status(this, "Pilot STOP: có $count nút Ảnh/Video phù hợp, không click")
                 }
             }
 
-            "PUBLISHING" -> {
-                // Production confirmation will be mapped after dry-run tests pass.
-                Prefs.status(this, "Đang chờ xác nhận Story đã đăng")
-            }
+            "MEDIA_PICKER" -> finishPilotAtMediaPicker(jobId)
+
+            // No other states are executable in the pilot APK. In particular there is no
+            // Sticker, Link form, or Publish action code in this build.
+            else -> Prefs.status(this, "Pilot STOP: stage ngoài whitelist, không thao tác")
         }
     }
 
-    private fun reportAndClear(jobId: String, state: String, note: String) {
+    private fun finishPilotAtMediaPicker(jobId: String) {
+        val prefs = Prefs.store(this)
+        if (prefs.getBoolean("pilot_report_sent", false)) return
+        prefs.edit()
+            .putString("automation_stage", "PILOT_STOPPED_AT_MEDIA_PICKER")
+            .putBoolean("pilot_report_sent", true)
+            .commit()
+        Prefs.status(this, "PILOT OK — dừng tại thư viện, không chọn media, không chạm Publish")
+
+        val claimToken = Prefs.claimToken(this)
+        val diagnostic = prefs.getString("last_ui_dump", "").orEmpty().take(900)
         Thread {
             try {
-                ApiClient(this).result(jobId, state, note = note)
+                ApiClient(this).result(
+                    jobId = jobId,
+                    claimToken = claimToken,
+                    state = "DRY_RUN_READY",
+                    note = "PILOT_STOP_MEDIA_PICKER | $diagnostic",
+                )
+                // Keep diagnostic, but clear the lease/job so the phone cannot accidentally continue.
                 Prefs.clearJob(this)
+                Prefs.status(this, "PILOT hoàn tất — hãy Copy UI diagnostic gửi để map bước tiếp theo")
             } catch (e: Exception) {
-                Prefs.status(this, "Không gửi được kết quả: ${e.message}")
+                prefs.edit().putBoolean("pilot_report_sent", false).apply()
+                Prefs.status(this, "Pilot đã dừng nhưng chưa báo server: ${e.message}")
             }
         }.start()
     }
 
-    private fun normalize(value: CharSequence?): String =
-        value?.toString()?.trim()?.lowercase().orEmpty()
-
-    private fun matches(node: AccessibilityNodeInfo, terms: List<String>): Boolean {
-        if (node.className?.toString()?.contains("EditText", ignoreCase = true) == true) return false
-        val text = normalize(node.text)
-        val desc = normalize(node.contentDescription)
-        return terms.any { term ->
-            val t = term.lowercase()
-            text == t || desc == t || text.contains(t) || desc.contains(t)
-        }
+    private fun nodeMatchesExact(node: AccessibilityNodeInfo, terms: Collection<String>): Boolean {
+        val klass = node.className?.toString().orEmpty()
+        if (klass.contains("EditText", ignoreCase = true)) return false
+        return UiMatcher.exactEither(node.text, node.contentDescription, terms)
     }
 
-    private fun findAny(root: AccessibilityNodeInfo, terms: List<String>): AccessibilityNodeInfo? {
+    private fun exactNodes(root: AccessibilityNodeInfo, terms: Collection<String>): List<AccessibilityNodeInfo> {
+        val out = mutableListOf<AccessibilityNodeInfo>()
         val queue = ArrayDeque<AccessibilityNodeInfo>()
         queue.add(root)
         var seen = 0
-        while (queue.isNotEmpty() && seen < 600) {
+        while (queue.isNotEmpty() && seen < 800) {
             val node = queue.removeFirst()
             seen++
-            if (matches(node, terms)) return node
-            for (i in 0 until node.childCount) {
-                node.getChild(i)?.let { queue.add(it) }
-            }
+            if (nodeMatchesExact(node, terms)) out.add(node)
+            for (i in 0 until node.childCount) node.getChild(i)?.let { queue.add(it) }
         }
-        return null
+        return out
     }
 
-    private fun hasAny(root: AccessibilityNodeInfo, terms: List<String>): Boolean =
-        findAny(root, terms) != null
+    private fun countExact(root: AccessibilityNodeInfo, terms: Collection<String>): Int =
+        exactNodes(root, terms).size
 
-    private fun clickAny(root: AccessibilityNodeInfo, terms: List<String>): Boolean =
-        findAny(root, terms)?.let { clickNode(it) } ?: false
+    private fun clickUniqueExact(root: AccessibilityNodeInfo, terms: Collection<String>): Boolean {
+        val matches = exactNodes(root, terms)
+        if (matches.size != 1) return false
+        return clickNode(matches.single())
+    }
 
     private fun clickNode(node: AccessibilityNodeInfo): Boolean {
         var current: AccessibilityNodeInfo? = node
         var depth = 0
-        while (current != null && depth < 5) {
-            if (current.isClickable && current.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+        while (current != null && depth < 4) {
+            if (current.isClickable && current.isEnabled) {
+                return current.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            }
             current = current.parent
             depth++
         }
         return false
     }
 
-    private fun editableNodes(root: AccessibilityNodeInfo): List<AccessibilityNodeInfo> {
-        val out = mutableListOf<AccessibilityNodeInfo>()
-        val queue = ArrayDeque<AccessibilityNodeInfo>()
-        queue.add(root)
-        var seen = 0
-        while (queue.isNotEmpty() && seen < 600) {
-            val node = queue.removeFirst()
-            seen++
-            val klass = node.className?.toString().orEmpty()
-            if (node.isEditable || klass.contains("EditText", ignoreCase = true)) out.add(node)
-            for (i in 0 until node.childCount) node.getChild(i)?.let { queue.add(it) }
-        }
-        return out
-    }
-
-    private fun setNodeText(node: AccessibilityNodeInfo, value: String): Boolean {
-        if (value.isBlank()) return false
-        val args = Bundle()
-        args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, value)
-        return node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
-    }
-
     private fun saveUiDiagnostic(root: AccessibilityNodeInfo) {
-        val labels = linkedSetOf<String>()
+        val lines = linkedSetOf<String>()
         val queue = ArrayDeque<AccessibilityNodeInfo>()
         queue.add(root)
         var seen = 0
-        while (queue.isNotEmpty() && seen < 500 && labels.size < 80) {
+        while (queue.isNotEmpty() && seen < 700 && lines.size < 120) {
             val node = queue.removeFirst()
             seen++
             val klass = node.className?.toString().orEmpty()
-            if (!klass.contains("EditText", ignoreCase = true)) {
-                if (node.isClickable || klass.contains("Button", ignoreCase = true)) {
-                    node.text?.toString()?.trim()?.takeIf { it.isNotBlank() }?.let { labels.add(it.take(100)) }
-                    node.contentDescription?.toString()?.trim()?.takeIf { it.isNotBlank() }?.let { labels.add(it.take(100)) }
+            val isEditor = node.isEditable || klass.contains("EditText", ignoreCase = true)
+            if (!isEditor && (node.isClickable || klass.contains("Button", ignoreCase = true))) {
+                val text = node.text?.toString()?.trim().orEmpty().take(80)
+                val desc = node.contentDescription?.toString()?.trim().orEmpty().take(80)
+                val id = node.viewIdResourceName.orEmpty().take(100)
+                val bounds = Rect().also { node.getBoundsInScreen(it) }
+                if (text.isNotBlank() || desc.isNotBlank() || id.isNotBlank()) {
+                    lines.add("class=${klass.substringAfterLast('.').take(40)};text=$text;desc=$desc;id=$id;click=${node.isClickable};bounds=$bounds")
                 }
             }
             for (i in 0 until node.childCount) node.getChild(i)?.let { queue.add(it) }
         }
-        Prefs.store(this).edit().putString("last_ui_dump", labels.joinToString(" | ")).apply()
+        Prefs.store(this).edit().putString("last_ui_dump", lines.joinToString("\n").take(12000)).apply()
     }
 
     override fun onInterrupt() {
-        Prefs.status(this, "Accessibility bị tạm ngắt")
+        Prefs.status(this, "Accessibility Pilot bị tạm ngắt")
     }
 }
