@@ -11,11 +11,15 @@ class Settings(BaseSettings):
     poll_seconds: int = 20
     dry_run: bool = True
 
+    # Publishing transport. ANDROID is the safe default; BROWSER is legacy-only.
+    publish_transport: str = "ANDROID"
+
     # Google auth. AUTO prefers OAuth, then falls back to service account.
     google_auth_mode: str = "AUTO"
     google_oauth_credentials_json: str = "{}"
     google_service_account_json: str = "{}"
 
+    # Legacy browser transport settings. Do not use unless explicitly switched back to BROWSER.
     meta_business_url: str = "https://business.facebook.com/latest/home"
     meta_storage_state_path: str = "/data/meta_storage_state.json"
     meta_storage_state_b64: str = ""
