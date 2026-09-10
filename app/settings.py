@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     # Publishing transport. ANDROID is the safe default; BROWSER is legacy-only.
     publish_transport: str = "ANDROID"
 
+    # Android companion API. The token is stored only in Railway + the phone.
+    android_api_token: str = ""
+
     # Google auth. AUTO prefers OAuth, then falls back to service account.
     google_auth_mode: str = "AUTO"
     google_oauth_credentials_json: str = "{}"
