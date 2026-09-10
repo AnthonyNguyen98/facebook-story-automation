@@ -11,28 +11,20 @@ class Settings(BaseSettings):
     poll_seconds: int = 20
     dry_run: bool = True
 
-    # Publishing transport. ANDROID is the safe default; BROWSER is legacy-only.
+    # Android is the only supported publishing transport. Railway must never open Facebook.
     publish_transport: str = "ANDROID"
 
-    # Android companion API. The token is stored only in Railway + the phone.
+    # Android companion API. Token lives only in Railway + the phone.
     android_api_token: str = ""
+    android_claim_lease_sec: int = 900
+    android_max_media_bytes: int = 262_144_000
 
     # Google auth. AUTO prefers OAuth, then falls back to service account.
     google_auth_mode: str = "AUTO"
     google_oauth_credentials_json: str = "{}"
     google_service_account_json: str = "{}"
 
-    # Legacy browser transport settings. Do not use unless explicitly switched back to BROWSER.
-    meta_business_url: str = "https://business.facebook.com/latest/home"
-    meta_storage_state_path: str = "/data/meta_storage_state.json"
-    meta_storage_state_b64: str = ""
-    meta_user_agent: str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
-    meta_locale: str = "vi-VN"
-    strict_link_text: bool = True
-    headless: bool = True
-
     work_dir: str = "/tmp/facebook-story-worker"
-    session_dir: str = "/data"
 
 
 settings = Settings()
