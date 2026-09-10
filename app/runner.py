@@ -21,6 +21,8 @@ def _bool(v: str, default=False) -> bool:
 
 class JobRunner:
     def __init__(self):
+        if (settings.publish_transport or "").strip().upper() != "ANDROID":
+            raise RuntimeError("ONLY_ANDROID_TRANSPORT_IS_SUPPORTED")
         self.store = GoogleStore()
         self.work_root = Path(settings.work_dir)
         self.work_root.mkdir(parents=True, exist_ok=True)
@@ -36,22 +38,23 @@ class JobRunner:
         cfg = self.store.read_config()
         now = datetime.now(ZoneInfo(settings.timezone))
         jid = job.job_id or f"ROW-{job.row}"
-        transport = (settings.publish_transport or "ANDROID").strip().upper()
-        actor = "android-control-plane" if transport == "ANDROID" else "browser-worker"
+        actor = "android-control-plane"
 
         self.store.update_job(job.row, STATUS="PROCESSING", ERROR="", NEXT_ATTEMPT_AT="")
         self.store.append_log([
             now.strftime("%d/%m/%Y %H:%M:%S"), jid, "START", job.status,
-            "PROCESSING", "CLAIM_JOB", "OK", job.retry_count, actor, "", "", ""
+            "PROCESSING", "PREPARE_MEDIA", "OK", job.retry_count, actor, "", "", ""
         ])
         try:
             default_link = cfg.get("DEFAULT_LINK", "").strip()
+            if not default_link:
+                raise RuntimeError("DEFAULT_LINK_NOT_CONFIGURED")
             link_locked = _bool(cfg.get("LINK_LOCKED", "TRUE"), True)
             link = (job.link_url or default_link).strip()
             if link_locked and link != default_link:
                 raise RuntimeError("LINK_LOCKED_MISMATCH")
 
-            repeat_window = as_int(cfg.get("LINK_TEXT_REPEAT_WINDOW", "1"), 1)
+            repeat_window = max(1, as_int(cfg.get("LINK_TEXT_REPEAT_WINDOW", "1"), 1))
             link_text = select_link_text(cfg, self.store.recent_link_texts(repeat_window), job.link_text)
 
             job_dir = self.work_root / jid
@@ -64,7 +67,7 @@ class JobRunner:
 
             detected = detect_type(source, job.text_content)
             content_type = detected if job.content_type in {"", "AUTO"} else job.content_type
-            if content_type == "NEEDS_REVIEW":
+            if content_type not in {"VIDEO", "IMAGE", "TEXT"}:
                 raise RuntimeError("CONTENT_TYPE_NEEDS_REVIEW")
 
             music_path = None
@@ -80,7 +83,7 @@ class JobRunner:
                     if not selected_track:
                         raise RuntimeError("MUSIC_TRACK_OVERRIDE_NOT_FOUND")
                 else:
-                    recent_n = as_int(cfg.get("MUSIC_REPEAT_WINDOW", "10"), 10)
+                    recent_n = max(0, as_int(cfg.get("MUSIC_REPEAT_WINDOW", "10"), 10))
                     selected_track = choose_track(
                         self.store.music_catalog(), job.music_pool,
                         self.store.recent_track_ids(recent_n), cfg
@@ -93,8 +96,16 @@ class JobRunner:
                 )
 
             ready = prepare_media(source, content_type, job.text_content, music_path, job_dir / "ready", cfg)
-            ready_folder = cfg.get("MEDIA_READY_FOLDER_ID", "")
-            ready_ref = self.store.upload_file(ready, ready_folder, f"{jid}_{ready.name}") if ready_folder else {"url": ""}
+            if not ready.exists() or ready.stat().st_size <= 0:
+                raise RuntimeError("READY_MEDIA_EMPTY")
+
+            ready_folder = cfg.get("MEDIA_READY_FOLDER_ID", "").strip()
+            if not ready_folder:
+                raise RuntimeError("MEDIA_READY_FOLDER_ID_NOT_CONFIGURED")
+            ready_ref = self.store.upload_file(ready, ready_folder, f"{jid}_{ready.name}")
+            ready_url = ready_ref.get("url", "").strip()
+            if not ready_url:
+                raise RuntimeError("READY_MEDIA_UPLOAD_MISSING_URL")
 
             self.store.update_job(
                 job.row,
@@ -103,53 +114,20 @@ class JobRunner:
                 MUSIC_TRACK_ID=selected_track.track_id if selected_track else job.music_track_id,
                 LINK_URL=link,
                 LINK_TEXT=link_text,
-                NOTE=f"READY:{ready_ref.get('url', '')}",
+                STATUS="VALIDATED",
+                ERROR="",
+                NEXT_ATTEMPT_AT="",
+                NOTE=f"ANDROID_READY:{ready_url}",
             )
-
-            # Android transport intentionally stops here. Railway never opens Facebook.
-            if transport == "ANDROID":
-                self.store.update_job(
-                    job.row,
-                    STATUS="VALIDATED",
-                    ERROR="",
-                    NEXT_ATTEMPT_AT="",
-                    NOTE=f"ANDROID_READY:{ready_ref.get('url', '')}",
-                )
-                self.store.append_log([
-                    datetime.now(ZoneInfo(settings.timezone)).strftime("%d/%m/%Y %H:%M:%S"),
-                    jid, "ANDROID_READY", "PROCESSING", "VALIDATED", "HANDOFF_TO_ANDROID",
-                    "OK", job.retry_count, "android-control-plane", "", "",
-                    "Cloud preparation complete; Facebook not opened by Railway"
-                ])
-                return
-
-            # Legacy browser transport is deliberately opt-in only.
-            if transport != "BROWSER":
-                raise RuntimeError(f"UNSUPPORTED_PUBLISH_TRANSPORT:{transport}")
-
-            from .meta_worker import MetaWorker
-            worker = MetaWorker(job_dir / "screenshots")
-            screenshot = await worker.publish(ready, link, link_text, jid)
-            if settings.dry_run:
-                self.store.update_job(job.row, STATUS="VALIDATED", ERROR="", NOTE=f"DRY_RUN_OK:{screenshot}")
-                self.store.append_log([
-                    now.strftime("%d/%m/%Y %H:%M:%S"), jid, "DRY_RUN", "PROCESSING",
-                    "VALIDATED", "META_UI", "OK", job.retry_count, "browser-worker",
-                    str(screenshot), "", "Publish button not clicked"
-                ])
-            else:
-                published = datetime.now(ZoneInfo(settings.timezone))
-                self.store.update_job(job.row, STATUS="PUBLISHED", PUBLISHED_AT=published, ERROR="", NEXT_ATTEMPT_AT="")
-                if selected_track:
-                    self.store.mark_track_used(selected_track)
-                self.store.append_log([
-                    published.strftime("%d/%m/%Y %H:%M:%S"), jid, "PUBLISH", "PROCESSING",
-                    "PUBLISHED", "META_UI", "OK", job.retry_count, "browser-worker",
-                    str(screenshot), "", ""
-                ])
+            self.store.append_log([
+                datetime.now(ZoneInfo(settings.timezone)).strftime("%d/%m/%Y %H:%M:%S"),
+                jid, "ANDROID_READY", "PROCESSING", "VALIDATED", "HANDOFF_TO_ANDROID",
+                "OK", job.retry_count, actor, "", "",
+                "Cloud preparation complete; Railway cannot open Facebook"
+            ])
         except Exception as exc:
-            retry_max = as_int(cfg.get("RETRY_MAX", "3"), 3)
-            delay = as_int(cfg.get("RETRY_DELAY_SEC", "120"), 120)
+            retry_max = max(0, as_int(cfg.get("RETRY_MAX", "3"), 3))
+            delay = max(30, as_int(cfg.get("RETRY_DELAY_SEC", "120"), 120))
             retry_count = job.retry_count + 1
             if retry_count <= retry_max:
                 next_try = datetime.now(ZoneInfo(settings.timezone)) + timedelta(seconds=delay)
@@ -162,12 +140,12 @@ class JobRunner:
                 STATUS=status,
                 RETRY_COUNT=retry_count,
                 NEXT_ATTEMPT_AT=next_try,
-                ERROR=str(exc),
+                ERROR=str(exc)[:1500],
             )
             self.store.append_log([
                 datetime.now(ZoneInfo(settings.timezone)).strftime("%d/%m/%Y %H:%M:%S"),
-                jid, "ERROR", "PROCESSING", status, "PROCESS_JOB", "ERROR",
-                retry_count, actor, "", str(exc), ""
+                jid, "ERROR", "PROCESSING", status, "PREPARE_MEDIA", "ERROR",
+                retry_count, actor, "", str(exc)[:1000], ""
             ])
 
 
@@ -179,6 +157,6 @@ async def scheduler_loop(stop: asyncio.Event):
         except Exception as exc:
             print(f"scheduler error: {exc}", flush=True)
         try:
-            await asyncio.wait_for(stop.wait(), timeout=settings.poll_seconds)
+            await asyncio.wait_for(stop.wait(), timeout=max(5, settings.poll_seconds))
         except asyncio.TimeoutError:
             pass
