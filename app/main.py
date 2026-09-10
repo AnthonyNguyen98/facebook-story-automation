@@ -118,7 +118,10 @@ def android_next_job():
     store = GoogleStore()
     candidates = [
         j for j in store.read_queue()
-        if j.status == "VALIDATED" and _ready_url(j.note)
+        if j.status == "VALIDATED"
+        and _ready_url(j.note)
+        and "ANDROID_DRY_RUN_OK" not in (j.note or "")
+        and "ANDROID_PUBLISHED" not in (j.note or "")
     ]
     if not candidates:
         return {"job": None}
