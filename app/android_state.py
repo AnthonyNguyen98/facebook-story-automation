@@ -113,6 +113,8 @@ def transition_decision(current_status: str, requested_state: str, dry_run: bool
         return "PUBLISHED"
     if state in {"DRY_RUN_READY", "READY_TO_PUBLISH"}:
         return "DRY_RUN_OK"
+    if state == "PILOT_DIAGNOSTIC":
+        return "PILOT_OK"
     if state in {"FAILED", "RELEASE"}:
         return "RELEASE"
     raise ValueError("INVALID_ANDROID_RESULT_STATE")
