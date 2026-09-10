@@ -16,7 +16,8 @@ class Settings(BaseSettings):
 
     # Android companion API. Token lives only in Railway + the phone.
     android_api_token: str = ""
-    android_claim_lease_sec: int = 900
+    android_pilot_safe_mode: bool = True
+    android_claim_lease_sec: int = 1200
     android_max_media_bytes: int = 262_144_000
 
     # Google auth. AUTO prefers OAuth, then falls back to service account.
