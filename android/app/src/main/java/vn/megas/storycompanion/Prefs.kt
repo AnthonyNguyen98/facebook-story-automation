@@ -52,8 +52,9 @@ object Prefs {
             .putString("current_job_id", jobId)
             .putString("current_link_url", linkUrl)
             .putString("current_link_text", linkText)
-            .putBoolean("publish_allowed", false) // Pilot hard-lock: never trust remote flag.
+            .putBoolean("publish_allowed", false)
             .putString("automation_stage", stage)
+            .putBoolean("pilot_report_sent", false)
             .commit()
     }
 
@@ -71,6 +72,7 @@ object Prefs {
             .remove("publish_allowed")
             .remove("automation_stage")
             .remove("pilot_running")
+            .remove("pilot_report_sent")
             .apply()
     }
 }
