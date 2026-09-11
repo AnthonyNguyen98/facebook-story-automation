@@ -1,8 +1,23 @@
+from types import SimpleNamespace
+
 import pytest
 from fastapi import HTTPException
 
-from app.main import _claim_token, _device_id, _job_payload, _require_android
+import app.main as main_module
+from app.android_state import ClaimMeta, note_with_claim
+from app.main import (
+    _claim_token,
+    _device_id,
+    _job_payload,
+    _require_android,
+    _verify_current_claim,
+)
 from app.settings import settings
+
+
+READY = "ANDROID_READY:https://drive.google.com/file/d/abc123456789012/view"
+DEVICE = "android-device-01"
+CLAIM_TOKEN = "C" * 32
 
 
 class DummyJob:
@@ -75,3 +90,54 @@ def test_job_payload_requires_both_safety_switches_off_before_publish_flag(monke
     monkeypatch.setattr(settings, "android_pilot_safe_mode", False)
     payload = _job_payload(DummyJob())
     assert payload["publish_allowed"] is True
+
+
+def expired_claim_job():
+    claim = ClaimMeta(DEVICE, CLAIM_TOKEN, 1_000)
+    return SimpleNamespace(status="PROCESSING", note=note_with_claim(READY, claim))
+
+
+def test_expired_claim_cannot_download_or_report_success(monkeypatch):
+    monkeypatch.setattr(main_module, "now_epoch", lambda: 1_001)
+    with pytest.raises(HTTPException) as exc:
+        _verify_current_claim(expired_claim_job(), DEVICE, CLAIM_TOKEN)
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "CLAIM_LEASE_EXPIRED"
+
+
+def test_expired_claim_owner_can_release_for_recovery(monkeypatch):
+    monkeypatch.setattr(main_module, "now_epoch", lambda: 1_001)
+    claim = _verify_current_claim(
+        expired_claim_job(),
+        DEVICE,
+        CLAIM_TOKEN,
+        allow_expired=True,
+    )
+    assert claim.device_id == DEVICE
+    assert claim.claim_token == CLAIM_TOKEN
+
+
+def test_expired_claim_wrong_device_still_cannot_release(monkeypatch):
+    monkeypatch.setattr(main_module, "now_epoch", lambda: 1_001)
+    with pytest.raises(HTTPException) as exc:
+        _verify_current_claim(
+            expired_claim_job(),
+            "android-other-02",
+            CLAIM_TOKEN,
+            allow_expired=True,
+        )
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "CLAIM_OWNERSHIP_MISMATCH"
+
+
+def test_expired_claim_wrong_token_still_cannot_release(monkeypatch):
+    monkeypatch.setattr(main_module, "now_epoch", lambda: 1_001)
+    with pytest.raises(HTTPException) as exc:
+        _verify_current_claim(
+            expired_claim_job(),
+            DEVICE,
+            "X" * 32,
+            allow_expired=True,
+        )
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "CLAIM_OWNERSHIP_MISMATCH"
