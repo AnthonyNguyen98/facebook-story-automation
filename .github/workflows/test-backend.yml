@@ -1,5 +1,6 @@
 name: Test Backend Safety
 
+# QA gate revision: 2026-09-11-a
 on:
   workflow_dispatch:
   push:
