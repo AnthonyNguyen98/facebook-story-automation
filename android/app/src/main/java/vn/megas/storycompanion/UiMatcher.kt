@@ -1,10 +1,12 @@
 package vn.megas.storycompanion
 
+import java.util.Locale
+
 object UiMatcher {
     fun normalize(value: CharSequence?): String = value
         ?.toString()
         ?.trim()
-        ?.lowercase()
+        ?.lowercase(Locale.ROOT)
         ?.replace(Regex("\\s+"), " ")
         .orEmpty()
 
