@@ -19,6 +19,16 @@ def _bool(v: str, default=False) -> bool:
     return v.strip().upper() in {"TRUE", "1", "YES", "Y"}
 
 
+def _stable_job_id(job) -> str:
+    if job.job_id:
+        return job.job_id
+    if job.scheduled_at:
+        stamp = job.scheduled_at.strftime("%Y%m%d-%H%M")
+    else:
+        stamp = "UNSCHEDULED"
+    return f"AUTO-{stamp}-R{job.row}"
+
+
 class JobRunner:
     def __init__(self):
         if (settings.publish_transport or "").strip().upper() != "ANDROID":
@@ -37,8 +47,29 @@ class JobRunner:
     async def process(self, job):
         cfg = self.store.read_config()
         now = datetime.now(ZoneInfo(settings.timezone))
-        jid = job.job_id or f"ROW-{job.row}"
+        jid = _stable_job_id(job)
         actor = "android-control-plane"
+
+        # A blank JOB_ID is legal input from ChatGPT/Sheet, but Android requires a
+        # stable unique id. Persist it before any processing so retries use the same id.
+        if not job.job_id:
+            self.store.update_job(job.row, JOB_ID=jid)
+            job.job_id = jid
+
+        duplicates = [j for j in self.store.read_queue() if j.job_id == jid]
+        if len(duplicates) != 1:
+            self.store.update_job(
+                job.row,
+                STATUS="FAILED",
+                ERROR="DUPLICATE_JOB_ID",
+                NEXT_ATTEMPT_AT="",
+            )
+            self.store.append_log([
+                now.strftime("%d/%m/%Y %H:%M:%S"), jid, "ERROR", job.status,
+                "FAILED", "VALIDATE_JOB_ID", "ERROR", job.retry_count, actor,
+                "", "DUPLICATE_JOB_ID", "Manual correction required",
+            ])
+            return
 
         self.store.update_job(job.row, STATUS="PROCESSING", ERROR="", NEXT_ATTEMPT_AT="")
         self.store.append_log([
@@ -98,6 +129,8 @@ class JobRunner:
             ready = prepare_media(source, content_type, job.text_content, music_path, job_dir / "ready", cfg)
             if not ready.exists() or ready.stat().st_size <= 0:
                 raise RuntimeError("READY_MEDIA_EMPTY")
+            if ready.stat().st_size > settings.android_max_media_bytes:
+                raise RuntimeError("READY_MEDIA_TOO_LARGE")
 
             ready_folder = cfg.get("MEDIA_READY_FOLDER_ID", "").strip()
             if not ready_folder:
