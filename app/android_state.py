@@ -70,6 +70,8 @@ def parse_claim(note: str) -> ClaimMeta | None:
 
 
 def make_claim(note: str, device_id: str, lease_seconds: int, now: int | None = None) -> ClaimMeta:
+    if not ready_url(note):
+        raise ValueError("READY_MEDIA_MISSING")
     if not valid_device_id(device_id):
         raise ValueError("INVALID_DEVICE_ID")
     if lease_seconds < 60 or lease_seconds > 3600:
@@ -92,7 +94,10 @@ def note_with_marker(note: str, marker: str) -> str:
     base = ready_base(note)
     if not base:
         raise ValueError("READY_MEDIA_MISSING")
-    return f"{base} | {marker}"
+    clean = (marker or "").strip()
+    if not clean or " | " in clean or "=" in clean:
+        raise ValueError("INVALID_MARKER")
+    return f"{base} | {clean}"
 
 
 def transition_decision(current_status: str, requested_state: str, dry_run: bool) -> str:
@@ -113,8 +118,6 @@ def transition_decision(current_status: str, requested_state: str, dry_run: bool
         return "PUBLISHED"
     if state in {"DRY_RUN_READY", "READY_TO_PUBLISH"}:
         return "DRY_RUN_OK"
-    if state == "PILOT_DIAGNOSTIC":
-        return "PILOT_OK"
     if state in {"FAILED", "RELEASE"}:
         return "RELEASE"
     raise ValueError("INVALID_ANDROID_RESULT_STATE")
