@@ -21,12 +21,17 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : Activity() {
+    companion object {
+        // Process-wide gate survives Activity recreation/rotation and prevents a double claim.
+        private val PILOT_GATE = AtomicBoolean(false)
+    }
+
     private lateinit var tokenInput: EditText
     private lateinit var statusText: TextView
     private val handler = Handler(Looper.getMainLooper())
-    @Volatile private var pilotStarting = false
 
     private val refresh = object : Runnable {
         override fun run() {
@@ -47,10 +52,11 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Prefs.scrubLegacyPlaintextSecrets(this)
         buildUi()
         requestRuntimePermissions()
         if (Prefs.currentJob(this).isNotBlank()) {
-            Prefs.status(this, "Phát hiện job dang dở. Hãy Release job server trước khi chạy pilot mới.")
+            Prefs.status(this, "Phát hiện job dang dở. Hãy dùng Release/Recovery trước khi chạy pilot mới.")
         }
         handler.post(refresh)
     }
@@ -101,7 +107,7 @@ class MainActivity : Activity() {
             if (tokenInput.text.toString().isNotBlank()) saveToken(showToast = false)
             runPilotOnce()
         })
-        root.addView(button("Release job server + reset local") { releaseCurrentJob() })
+        root.addView(button("Release/Recovery job + reset local") { releaseCurrentJob() })
         root.addView(button("Copy UI diagnostic") { copyDiagnostic() })
 
         statusText = TextView(this).apply {
@@ -178,25 +184,38 @@ class MainActivity : Activity() {
         }.start()
     }
 
+    private fun claimWithOneRetry(client: ApiClient, jobId: String): org.json.JSONObject {
+        return try {
+            client.claim(jobId)
+        } catch (first: Exception) {
+            // Claim is idempotent for the same device. This specifically covers the case
+            // where Railway committed the claim but the HTTP response was lost.
+            Thread.sleep(750)
+            client.claim(jobId)
+        }
+    }
+
     private fun runPilotOnce() {
-        if (pilotStarting) {
+        if (!PILOT_GATE.compareAndSet(false, true)) {
             toast("Pilot đang khởi động, không bấm lặp")
             return
         }
         if (Prefs.token(this).length < 32) {
+            PILOT_GATE.set(false)
             toast("Hãy lưu Android API token trước")
             return
         }
         if (Prefs.currentJob(this).isNotBlank()) {
-            toast("Đang có job dang dở. Hãy Release trước.")
+            PILOT_GATE.set(false)
+            toast("Đang có job dang dở. Hãy Recovery trước.")
             return
         }
         if (packageManager.getLaunchIntentForPackage("com.facebook.pages.app") == null) {
+            PILOT_GATE.set(false)
             toast("Chưa cài Meta Business Suite")
             return
         }
 
-        pilotStarting = true
         Prefs.status(this, "Pilot: đang kiểm tra server…")
         Thread {
             var claimedJobId = ""
@@ -208,7 +227,7 @@ class MainActivity : Activity() {
                 claimedJobId = next.getString("job_id")
                 if (claimedJobId.isBlank()) error("JOB_ID_EMPTY")
 
-                val claimed = client.claim(claimedJobId)
+                val claimed = claimWithOneRetry(client, claimedJobId)
                 claimToken = claimed.getString("claim_token")
                 if (claimToken.length < 20) error("CLAIM_TOKEN_INVALID")
                 if (claimed.optBoolean("publish_allowed", true)) error("PILOT_REFUSES_PUBLISH_ALLOWED_TRUE")
@@ -257,7 +276,7 @@ class MainActivity : Activity() {
                 Prefs.status(this, "Pilot không chạy: $message")
                 runOnUiThread { toast("Pilot dừng an toàn") }
             } finally {
-                pilotStarting = false
+                PILOT_GATE.set(false)
             }
         }.start()
     }
@@ -266,14 +285,30 @@ class MainActivity : Activity() {
         val jobId = Prefs.currentJob(this)
         val claim = Prefs.claimToken(this)
         if (jobId.isBlank()) {
-            toast("Không có job local để release")
+            toast("Không có job local để recovery")
             return
         }
+
+        // v0.1 upgrades can leave a local job with no hardened claim token. Calling
+        // /next triggers the server's legacy PROCESSING recovery; only clear local
+        // state after that authenticated recovery call succeeds.
         if (claim.isBlank()) {
-            Prefs.status(this, "Có job local nhưng thiếu claim token. Chờ lease server hết hạn rồi thử pilot lại.")
-            toast("Không force-clear để tránh lệch state")
+            Prefs.status(this, "Legacy recovery: đang đồng bộ state với server…")
+            Thread {
+                try {
+                    validatePilotServer(ApiClient(this).ping())
+                    ApiClient(this).nextJob()
+                    Prefs.clearJob(this)
+                    Prefs.status(this, "Legacy local state đã được recovery an toàn")
+                    runOnUiThread { toast("Legacy recovery hoàn tất") }
+                } catch (e: Exception) {
+                    Prefs.status(this, "Legacy recovery chưa thành công, local job được giữ: ${e.message}")
+                    runOnUiThread { toast("Chưa recovery được — không xóa local") }
+                }
+            }.start()
             return
         }
+
         Prefs.status(this, "Đang release job $jobId…")
         Thread {
             try {
