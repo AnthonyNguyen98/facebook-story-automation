@@ -15,6 +15,7 @@ class ApiClient(private val context: Context) {
 
     companion object {
         const val MAX_MEDIA_BYTES: Long = 262_144_000L
+        const val USER_AGENT = "MEGAS-Story-Companion/0.2.1-pilot"
     }
 
     private val baseUrl: String get() = Prefs.DEFAULT_BACKEND
@@ -35,7 +36,7 @@ class ApiClient(private val context: Context) {
         conn.setRequestProperty("X-Device-Id", deviceId)
         if (claimToken.isNotBlank()) conn.setRequestProperty("X-Claim-Token", claimToken)
         conn.setRequestProperty("Accept", "application/json")
-        conn.setRequestProperty("User-Agent", "MEGAS-Story-Companion/0.2.0")
+        conn.setRequestProperty("User-Agent", USER_AGENT)
         conn.instanceFollowRedirects = false
         return conn
     }
