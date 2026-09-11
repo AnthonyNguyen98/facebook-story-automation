@@ -15,6 +15,15 @@ object Prefs {
 
     fun backend(@Suppress("UNUSED_PARAMETER") context: Context): String = DEFAULT_BACKEND
 
+    fun scrubLegacyPlaintextSecrets(context: Context) {
+        // v0.1 stored these in the normal SharedPreferences file. v0.2+ uses
+        // Android Keystore-backed SecretStore. Remove old plaintext values on upgrade.
+        store(context).edit()
+            .remove(API_TOKEN_KEY)
+            .remove(CLAIM_TOKEN_KEY)
+            .apply()
+    }
+
     fun token(context: Context): String = SecretStore.get(context, API_TOKEN_KEY)
 
     fun setToken(context: Context, value: String) = SecretStore.put(context, API_TOKEN_KEY, value.trim())
