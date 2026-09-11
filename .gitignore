@@ -13,6 +13,15 @@ __pycache__/
 .venv/
 venv/
 
+# Android / Gradle
+android/.gradle/
+android/**/build/
+android/local.properties
+*.apk
+*.aab
+*.jks
+*.keystore
+
 # OS / editor
 .DS_Store
 .vscode/
