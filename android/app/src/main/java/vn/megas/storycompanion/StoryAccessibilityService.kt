@@ -60,22 +60,39 @@ class StoryAccessibilityService : AccessibilityService() {
 
             "MEDIA_PICKER" -> finishPilotAtMediaPicker(jobId)
 
+            // If reporting failed because the network was down, the stopped state is
+            // allowed to retry the same idempotent DRY_RUN_READY callback. It never clicks UI.
+            "PILOT_STOPPED_AT_MEDIA_PICKER" -> reportPilotResult(jobId)
+
             // No other states are executable in the pilot APK. In particular there is no
-            // Sticker, Link form, or Publish action code in this build.
+            // Sticker, Link form, media-selection, or Publish action code in this build.
             else -> Prefs.status(this, "Pilot STOP: stage ngoài whitelist, không thao tác")
         }
     }
 
     private fun finishPilotAtMediaPicker(jobId: String) {
         val prefs = Prefs.store(this)
-        if (prefs.getBoolean("pilot_report_sent", false)) return
         prefs.edit()
             .putString("automation_stage", "PILOT_STOPPED_AT_MEDIA_PICKER")
-            .putBoolean("pilot_report_sent", true)
             .commit()
         Prefs.status(this, "PILOT OK — dừng tại thư viện, không chọn media, không chạm Publish")
+        reportPilotResult(jobId)
+    }
 
+    private fun reportPilotResult(jobId: String) {
+        val prefs = Prefs.store(this)
+        if (prefs.getBoolean("pilot_report_sent", false)) return
         val claimToken = Prefs.claimToken(this)
+        if (claimToken.isBlank()) {
+            Prefs.status(this, "Pilot STOP: thiếu claim token, dùng Recovery trong app")
+            return
+        }
+
+        // Synchronous commit acts as a local single-flight guard against rapid Accessibility events.
+        if (!prefs.edit().putBoolean("pilot_report_sent", true).commit()) {
+            Prefs.status(this, "Pilot STOP: không khóa được report local")
+            return
+        }
         val diagnostic = prefs.getString("last_ui_dump", "").orEmpty().take(900)
         Thread {
             try {
@@ -90,7 +107,7 @@ class StoryAccessibilityService : AccessibilityService() {
                 Prefs.status(this, "PILOT hoàn tất — hãy Copy UI diagnostic gửi để map bước tiếp theo")
             } catch (e: Exception) {
                 prefs.edit().putBoolean("pilot_report_sent", false).apply()
-                Prefs.status(this, "Pilot đã dừng nhưng chưa báo server: ${e.message}")
+                Prefs.status(this, "Pilot đã dừng; chờ event để retry report: ${e.message}")
             }
         }.start()
     }
@@ -137,6 +154,16 @@ class StoryAccessibilityService : AccessibilityService() {
         return false
     }
 
+    private fun diagnosticLabel(value: CharSequence?): String {
+        val raw = value?.toString()?.trim().orEmpty().replace(Regex("\\s+"), " ")
+        if (raw.isBlank()) return ""
+        if (Regex("https?://", RegexOption.IGNORE_CASE).containsMatchIn(raw)) return "[url-redacted]"
+        if (Regex("[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}", RegexOption.IGNORE_CASE).containsMatchIn(raw)) {
+            return "[email-redacted]"
+        }
+        return raw.take(60)
+    }
+
     private fun saveUiDiagnostic(root: AccessibilityNodeInfo) {
         val lines = linkedSetOf<String>()
         val queue = ArrayDeque<AccessibilityNodeInfo>()
@@ -148,8 +175,8 @@ class StoryAccessibilityService : AccessibilityService() {
             val klass = node.className?.toString().orEmpty()
             val isEditor = node.isEditable || klass.contains("EditText", ignoreCase = true)
             if (!isEditor && (node.isClickable || klass.contains("Button", ignoreCase = true))) {
-                val text = node.text?.toString()?.trim().orEmpty().take(80)
-                val desc = node.contentDescription?.toString()?.trim().orEmpty().take(80)
+                val text = diagnosticLabel(node.text)
+                val desc = diagnosticLabel(node.contentDescription)
                 val id = node.viewIdResourceName.orEmpty().take(100)
                 val bounds = Rect().also { node.getBoundsInScreen(it) }
                 if (text.isNotBlank() || desc.isNotBlank() || id.isNotBlank()) {
