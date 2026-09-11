@@ -34,8 +34,8 @@ from .num import as_int
 from .runner import scheduler_loop
 from .settings import settings
 
-# Railway currently runs one replica. This lock also makes claim/recovery/result
-# atomic inside the process so two phones cannot both observe VALIDATED and win.
+# Railway currently runs one replica. This lock makes claim/recovery/result atomic
+# inside the process so two phones cannot both observe VALIDATED and win.
 _ANDROID_STATE_LOCK = threading.RLock()
 
 
@@ -164,25 +164,32 @@ def _job_payload(job, claim_token: str = "", lease_until: int = 0) -> dict:
     return payload
 
 
-def _verify_current_claim(job, device_id: str, claim_token: str):
+def _verify_current_claim(
+    job,
+    device_id: str,
+    claim_token: str,
+    *,
+    allow_expired: bool = False,
+):
+    """Verify claim ownership, optionally allowing an expired owner to release it.
+
+    `allow_expired=True` is only for FAILED/RELEASE cleanup. Media access, dry-run
+    success, and publish success always require an active lease.
+    """
     if job.status != "PROCESSING":
         raise HTTPException(status_code=409, detail=f"CLAIM_REQUIRES_PROCESSING:{job.status}")
     claim = parse_claim(job.note)
     if not claim:
         raise HTTPException(status_code=409, detail="JOB_HAS_NO_ACTIVE_CLAIM")
-    if not claim.active(now_epoch()):
-        raise HTTPException(status_code=409, detail="CLAIM_LEASE_EXPIRED")
     if claim.device_id != device_id or not hmac.compare_digest(claim.claim_token, claim_token):
         raise HTTPException(status_code=409, detail="CLAIM_OWNERSHIP_MISMATCH")
+    if not allow_expired and not claim.active(now_epoch()):
+        raise HTTPException(status_code=409, detail="CLAIM_LEASE_EXPIRED")
     return claim
 
 
 def _recover_expired_claims(store: GoogleStore, jobs) -> int:
-    """Recover crashed Android claims and legacy v0.1 PROCESSING rows.
-
-    A PROCESSING row with ANDROID_READY media but no parseable claim is impossible in
-    the hardened protocol, so it is safe to treat it as a legacy/stale claim.
-    """
+    """Recover crashed Android claims and legacy v0.1 PROCESSING rows."""
     current_epoch = now_epoch()
     now = datetime.now(ZoneInfo(settings.timezone))
     retry_max, retry_delay = _retry_policy(store)
@@ -423,7 +430,13 @@ def android_job_result(
             return {"ok": True, "status": "FAILED", "idempotent": True}
 
         claim_token = _claim_token(x_claim_token)
-        _verify_current_claim(job, device, claim_token)
+        allow_expired_release = state in {"FAILED", "RELEASE"}
+        _verify_current_claim(
+            job,
+            device,
+            claim_token,
+            allow_expired=allow_expired_release,
+        )
         try:
             decision = transition_decision(
                 job.status,
