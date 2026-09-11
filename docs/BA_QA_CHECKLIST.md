@@ -82,7 +82,8 @@ Status vocabulary:
 | `Đăng` appears inside `Đăng nhập` | Must NOT match | AUTOMATED |
 | `Link` appears inside `Copy link` | Must NOT match | AUTOMATED |
 | Exact one Photo/Video match | Click | PASS |
-| Media picker reached | Stop and report dry-run diagnostic | PASS |
+| Meta-internal media picker reached | Stop and report dry-run diagnostic | PASS |
+| Android launches a system/gallery picker in another package | Do not broaden Accessibility; no action in foreign package, then recover/release job for device-specific mapping | PILOT-PENDING |
 | Editable URL/email appears in diagnostic | Editable omitted; URL/email redacted | PASS |
 | Unknown automation stage | Stop; no UI action | PASS |
 | Media thumbnail selection | Not present in Pilot APK | PILOT-PENDING |
@@ -105,6 +106,7 @@ Changing only one switch is not enough to enable posting. Production activation 
 Backend:
 
 - Python compile
+- API authorization/safety guards
 - state-machine negative tests
 - claim/lease tests
 - dry-run Publish rejection
@@ -130,11 +132,12 @@ Before extending automation beyond the media picker, all must pass on the spare 
 3. Accessibility is enabled only for MEGAS Story Companion;
 4. one controlled test job is claimed once;
 5. correct Story creation flow opens;
-6. media picker diagnostic is captured without selecting media;
-7. server receives `ANDROID_DRY_RUN_OK`;
-8. queue returns to `VALIDATED` with dry-run marker and does not redeliver the same completed Pilot job;
-9. no Story is published;
-10. no Facebook credential/session exists in Railway logs or variables.
+6. media picker behavior/package is identified without selecting media;
+7. if picker remains inside Meta, diagnostic is captured and server receives `ANDROID_DRY_RUN_OK`;
+8. if picker is external, app performs no foreign-package action and job is safely recovered/released;
+9. queue does not redeliver a completed Pilot job;
+10. no Story is published;
+11. no Facebook credential/session exists in Railway logs or variables.
 
 ## 10. Production blockers
 
